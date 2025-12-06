@@ -7,6 +7,7 @@ const useSignup = () => {
 	const { setAuthUser } = useAuthContext();
 
 	const signup = async ({ fullname, username, password, confirmPassword, gender,contactno }) => {
+		console.log("Signup submit payload", { fullname, username, password, confirmPassword, gender, contactno });
 		const success = handleInputErrors({ fullname, username, password, confirmPassword, gender });
 		if (!success) return;
 
@@ -36,7 +37,9 @@ const useSignup = () => {
 export default useSignup;
 
 function handleInputErrors({ fullname, username, password, confirmPassword, gender,contactno }) {
+	console.log("Validating signup input", { fullname, username, password, confirmPassword, gender, contactno });
 	if (!fullname || !username || !password || !confirmPassword || !gender|| !contactno) {
+		console.warn("Validation failed: missing field", { fullname, username, password, confirmPassword, gender, contactno });
 		toast.error("Please fill in all fields");
 		return false;
 	}
