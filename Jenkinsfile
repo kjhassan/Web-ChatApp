@@ -1,115 +1,244 @@
 pipeline {
-    agent any
-
-    options {
-        buildDiscarder(logRotator(numToKeepStr: '5'))
-        timestamps()
-    }
-
-    environment {
-        // URL of your Selenium tests repo (change this later)
-        TEST_REPO = 'https://github.com/kjhassan/Web-ChatApp-Tests.git'
-        MONGO_URI = credentials('MONGO_DB_URI')
-        JWT_SECRET = credentials('JWT_SECRET')
-        APP_PORT = '5000'
-    }
-
-    triggers {
-        githubPush()
+    agent {
+        docker {
+            // You can change this to any Python image you like
+            image 'python:3.11-slim'
+            // run as root so pip install works
+            args '-u root:root'
+        }
     }
 
     stages {
-
-        stage('Checkout App Code') {
+        stage('Clone Repository') {
             steps {
-                echo 'Checking out application code...'
-                checkout scm
+                // Your repo + main branch
+                git branch: 'main', url: 'https://github.com/kjhassan/MERN-project.git'
             }
         }
 
-        stage('Clone Test Repo') {
+        stage('Install Dependencies') {
             steps {
-                echo 'Cloning Selenium tests repository...'
                 sh '''
-                  rm -rf tests || true
-                  git clone ${TEST_REPO} tests
+                    python -m pip install --upgrade pip
+                    pip install -r requirements.txt
                 '''
             }
         }
 
-        stage('Build & Run Selenium Tests (Docker)') {
+        stage('Run Tests') {
             steps {
-                echo 'Building test Docker image and running tests...'
-                dir('tests') {
-                    sh '''
-                      # Build test Docker image (Dockerfile must be in tests repo root)
-                      docker build -t chat-tests .
-
-                      # Run tests in container
-                      # IMPORTANT: We mount current folder so report.xml is saved on host
-                      docker run --rm \
-                        -v "$PWD:/workspace" \
-                        -w /workspace \
-                        --name chat-tests-container \
-                        chat-tests
-                    '''
-                }
-            }
-            post {
-                always {
-                    echo 'Archiving test report (JUnit XML)...'
-                    // Expecting report.xml created by container under tests/report.xml
-                    junit 'tests/report.xml'
-                }
-            }
-        }
-
-        stage('Build App Docker Image') {
-            steps {
-                echo 'Building application Docker image...'
                 sh '''
-                  docker build -t chatapp:latest -f backend/Dockerfile .
+                    mkdir -p reports
+                    # Pytest will auto-discover tests (e.g. in tests/ folder)
+                    pytest -v --junitxml=reports/results.xml
                 '''
             }
         }
 
-        stage('Deploy App on EC2 (same machine)') {
+        stage('Publish Test Results') {
             steps {
-                echo '🚀 Deploying container on EC2 (same host as Jenkins)...'
-                sh '''
-                # Stop old container if running
-                docker stop chatapp || true
-                docker rm chatapp || true
-
-                # Run new container with environment variables from Jenkins
-                docker run -d \
-                    --name chatapp \
-                    -p ${APP_PORT}:${APP_PORT} \
-                    -e PORT="${APP_PORT}" \
-                    -e MONGO_URI="${MONGO_URI}" \
-                    -e JWT_SECRET="${JWT_SECRET}" \
-                    -e NODE_ENV="production" \
-                    chatapp:latest
-
-                # Optional cleanup to save space
-                docker system prune -af || true
-                '''
+                // Tell Jenkins where the JUnit XML report is
+                junit 'reports/results.xml'
             }
-        }    
+        }
     }
 
     post {
-        success {
-            echo "Pipeline SUCCESS: Build, test, and deploy completed."
-        }
-        failure {
-            echo "Pipeline FAILED: Check the stage logs."
-        }
         always {
-            cleanWs()
+            script {
+                // (Optional) avoid "unsafe repository" warnings
+                sh "git config --global --add safe.directory ${env.WORKSPACE}"
+
+                // Get commit author email (like your teacher's example)
+                def committer = sh(
+                    script: "git log -1 --pretty=format:'%ae' || echo 'unknown@local'",
+                    returnStdout: true
+                ).trim()
+
+                // Read all <testcase> lines from the pytest JUnit report
+                def raw = sh(
+                    script: "grep -h \"<testcase\" reports/results.xml || true",
+                    returnStdout: true
+                ).trim()
+
+                int total = 0
+                int passed = 0
+                int failed = 0
+                int skipped = 0
+
+                def details = ""
+
+                if (raw) {
+                    raw.split('\\n').each { line ->
+                        total++
+
+                        def matcher = (line =~ /name=\"([^\"]+)\"/)
+                        def name = matcher ? matcher[0][1] : "UnknownTest"
+
+                        if (line.contains("<failure")) {
+                            failed++
+                            details += "${name} — FAILED\n"
+                        } else if (line.contains("<skipped") || line.contains("</skipped>")) {
+                            skipped++
+                            details += "${name} — SKIPPED\n"
+                        } else {
+                            passed++
+                            details += "${name} — PASSED\n"
+                        }
+                    }
+                }
+
+                def emailBody = """
+Test Summary (Build #${env.BUILD_NUMBER})
+
+Total Tests:   ${total}
+Passed:        ${passed}
+Failed:        ${failed}
+Skipped:       ${skipped}
+
+Committer:     ${committer}
+
+Detailed Results:
+${details}
+"""
+
+                emailext(
+                    // send to you + also to the committer (like teacher's style)
+                    to: "khadeejahassan@gmail.com, ${committer}",
+                    subject: "ChatApp Selenium Tests — Build #${env.BUILD_NUMBER} Results",
+                    body: emailBody
+                )
+            }
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// pipeline {
+//     agent any
+
+//     options {
+//         buildDiscarder(logRotator(numToKeepStr: '5'))
+//         timestamps()
+//     }
+
+//     environment {
+//         // URL of your Selenium tests repo (change this later)
+//         TEST_REPO = 'https://github.com/kjhassan/Web-ChatApp-Tests.git'
+//         MONGO_URI = credentials('MONGO_DB_URI')
+//         JWT_SECRET = credentials('JWT_SECRET')
+//         APP_PORT = '5000'
+//     }
+
+//     triggers {
+//         githubPush()
+//     }
+
+//     stages {
+
+//         stage('Checkout App Code') {
+//             steps {
+//                 echo 'Checking out application code...'
+//                 checkout scm
+//             }
+//         }
+
+//         stage('Clone Test Repo') {
+//             steps {
+//                 echo 'Cloning Selenium tests repository...'
+//                 sh '''
+//                   rm -rf tests || true
+//                   git clone ${TEST_REPO} tests
+//                 '''
+//             }
+//         }
+
+//         stage('Build & Run Selenium Tests (Docker)') {
+//             steps {
+//                 echo 'Building test Docker image and running tests...'
+//                 dir('tests') {
+//                     sh '''
+//                       # Build test Docker image (Dockerfile must be in tests repo root)
+//                       docker build -t chat-tests .
+
+//                       # Run tests in container
+//                       # IMPORTANT: We mount current folder so report.xml is saved on host
+//                       docker run --rm \
+//                         -v "$PWD:/workspace" \
+//                         -w /workspace \
+//                         --name chat-tests-container \
+//                         chat-tests
+//                     '''
+//                 }
+//             }
+//             post {
+//                 always {
+//                     echo 'Archiving test report (JUnit XML)...'
+//                     // Expecting report.xml created by container under tests/report.xml
+//                     junit 'tests/report.xml'
+//                 }
+//             }
+//         }
+
+//         stage('Build App Docker Image') {
+//             steps {
+//                 echo 'Building application Docker image...'
+//                 sh '''
+//                   docker build -t chatapp:latest -f backend/Dockerfile .
+//                 '''
+//             }
+//         }
+
+//         stage('Deploy App on EC2 (same machine)') {
+//             steps {
+//                 echo 'Deploying container on EC2 (same host as Jenkins)...'
+//                 sh '''
+//                 # Stop old container if running
+//                 docker stop chatapp || true
+//                 docker rm chatapp || true
+
+//                 # Run new container with environment variables from Jenkins
+//                 docker run -d \
+//                     --name chatapp \
+//                     -p ${APP_PORT}:${APP_PORT} \
+//                     -e PORT="${APP_PORT}" \
+//                     -e MONGO_URI="${MONGO_URI}" \
+//                     -e JWT_SECRET="${JWT_SECRET}" \
+//                     -e NODE_ENV="production" \
+//                     chatapp:latest
+
+//                 # Optional cleanup to save space
+//                 docker system prune -af || true
+//                 '''
+//             }
+//         }    
+//     }
+
+//     post {
+//         success {
+//             echo "Pipeline SUCCESS: Build, test, and deploy completed."
+//         }
+//         failure {
+//             echo "Pipeline FAILED: Check the stage logs."
+//         }
+//         always {
+//             cleanWs()
+//         }
+//     }
+// }
 
 
 
