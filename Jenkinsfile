@@ -1,44 +1,102 @@
 pipeline {
     agent {
         docker {
-            // You can change this to any Python image you like
             image 'python:3.11-slim'
-            // run as root so pip install works
             args '-u root:root'
         }
     }
 
+    environment {
+        TEST_REPO_URL = 'https://github.com/kjhassan/Web-ChatApp-Tests.git'
+        TEST_REPO_DIR = 'chatapp-tests'
+        TEST_RESULTS  = 'reports/results.xml'
+        EMAIL_TO      = 'khadeejahassan561@gmail.com'
+    }
+
     stages {
-        stage('Clone Repository') {
+
+        stage('Checkout Application Repo') {
             steps {
-                // Your repo + main branch
-                git branch: 'main', url: 'https://github.com/kjhassan/MERN-project.git'
+                // Jenkins already does "Declarative: Checkout SCM" before this,
+                // so this is usually redundant, but safe to keep:
+                checkout scm
             }
         }
 
-        stage('Install Dependencies') {
+        stage('Clone Test Repo') {
+            steps {
+                dir(env.TEST_REPO_DIR) {
+                    git branch: 'main', url: env.TEST_REPO_URL
+                }
+            }
+        }
+
+        stage('Install System Tools (Node, npm, curl)') {
             steps {
                 sh '''
-                    python -m pip install --upgrade pip
-                    pip install -r requirements.txt
+                  apt-get update
+                  apt-get install -y nodejs npm curl
                 '''
+            }
+        }
+
+        stage('Install App Dependencies') {
+            steps {
+                sh '''
+                  cd backend
+                  npm install
+                '''
+            }
+        }
+
+        stage('Start Application (port 5000)') {
+            steps {
+                sh '''
+                  cd backend
+
+                  # Start server in background
+                  nohup npm run server > /tmp/server.log 2>&1 &
+
+                  echo "Waiting for server on http://localhost:5000 ..."
+
+                  # Try for ~60 seconds
+                  for i in $(seq 1 30); do
+                    if curl -sSf http://localhost:5000 > /dev/null 2>&1; then
+                      echo "Server is up!"
+                      exit 0
+                    fi
+                    sleep 2
+                  done
+
+                  echo "ERROR: Server did not start on port 5000 in time." >&2
+                  exit 1
+                '''
+            }
+        }
+
+        stage('Install Test Dependencies') {
+            steps {
+                sh """
+                  cd ${env.TEST_REPO_DIR}
+                  python -m pip install --upgrade pip
+                  pip install -r requirements.txt
+                """
             }
         }
 
         stage('Run Tests') {
             steps {
-                sh '''
-                    mkdir -p reports
-                    # Pytest will auto-discover tests (e.g. in tests/ folder)
-                    pytest -v --junitxml=reports/results.xml
-                '''
+                sh """
+                  mkdir -p reports
+                  cd ${env.TEST_REPO_DIR}
+                  pytest -v --junitxml=../${env.TEST_RESULTS}
+                """
             }
         }
 
         stage('Publish Test Results') {
             steps {
-                // Tell Jenkins where the JUnit XML report is
-                junit 'reports/results.xml'
+                junit "${env.TEST_RESULTS}"
             }
         }
     }
@@ -46,44 +104,41 @@ pipeline {
     post {
         always {
             script {
-                // (Optional) avoid "unsafe repository" warnings
-                sh "git config --global --add safe.directory ${env.WORKSPACE}"
-
-                // Get commit author email (like your teacher's example)
-                def committer = sh(
-                    script: "git log -1 --pretty=format:'%ae' || echo 'unknown@local'",
-                    returnStdout: true
-                ).trim()
-
-                // Read all <testcase> lines from the pytest JUnit report
-                def raw = sh(
-                    script: "grep -h \"<testcase\" reports/results.xml || true",
-                    returnStdout: true
-                ).trim()
+                // If there is no report (e.g. early failure), avoid crashing
+                def raw = ''
+                try {
+                    raw = sh(
+                        script: "grep -h \"<testcase\" ${env.TEST_RESULTS} || true",
+                        returnStdout: true
+                    ).trim()
+                } catch (ignored) {
+                    raw = ''
+                }
 
                 int total = 0
                 int passed = 0
                 int failed = 0
                 int skipped = 0
-
-                def details = ""
+                String details = ""
 
                 if (raw) {
-                    raw.split('\\n').each { line ->
+                    raw.split('\n').each { line ->
+                        if (!line.trim()) return
+
                         total++
 
-                        def matcher = (line =~ /name=\"([^\"]+)\"/)
-                        def name = matcher ? matcher[0][1] : "UnknownTest"
+                        def nameMatch = (line =~ /name=\"([^\"]+)\"/)
+                        def testName = nameMatch ? nameMatch[0][1] : "UnknownTest"
 
                         if (line.contains("<failure")) {
                             failed++
-                            details += "${name} — FAILED\n"
+                            details += "${testName} — FAILED\n"
                         } else if (line.contains("<skipped") || line.contains("</skipped>")) {
                             skipped++
-                            details += "${name} — SKIPPED\n"
+                            details += "${testName} — SKIPPED\n"
                         } else {
                             passed++
-                            details += "${name} — PASSED\n"
+                            details += "${testName} — PASSED\n"
                         }
                     }
                 }
@@ -96,22 +151,145 @@ Passed:        ${passed}
 Failed:        ${failed}
 Skipped:       ${skipped}
 
-Committer:     ${committer}
-
 Detailed Results:
-${details}
+${details ?: "No test details available (tests may not have run)."}
+
 """
 
                 emailext(
-                    // send to you + also to the committer (like teacher's style)
-                    to: "khadeejahassan@gmail.com, ${committer}",
-                    subject: "ChatApp Selenium Tests — Build #${env.BUILD_NUMBER} Results",
+                    to: env.EMAIL_TO,
+                    subject: "ChatApp CI – Build #${env.BUILD_NUMBER} Test Results",
                     body: emailBody
                 )
             }
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+// pipeline {
+//     agent {
+//         docker {
+//             // You can change this to any Python image you like
+//             image 'python:3.11-slim'
+//             // run as root so pip install works
+//             args '-u root:root'
+//         }
+//     }
+
+//     stages {
+//         stage('Clone Repository') {
+//             steps {
+//                 // Your repo + main branch
+//                 git branch: 'main', url: 'https://github.com/kjhassan/MERN-project.git'
+//             }
+//         }
+
+//         stage('Install Dependencies') {
+//             steps {
+//                 sh '''
+//                     python -m pip install --upgrade pip
+//                     pip install -r requirements.txt
+//                 '''
+//             }
+//         }
+
+//         stage('Run Tests') {
+//             steps {
+//                 sh '''
+//                     mkdir -p reports
+//                     # Pytest will auto-discover tests (e.g. in tests/ folder)
+//                     pytest -v --junitxml=reports/results.xml
+//                 '''
+//             }
+//         }
+
+//         stage('Publish Test Results') {
+//             steps {
+//                 // Tell Jenkins where the JUnit XML report is
+//                 junit 'reports/results.xml'
+//             }
+//         }
+//     }
+
+//     post {
+//         always {
+//             script {
+//                 // (Optional) avoid "unsafe repository" warnings
+//                 sh "git config --global --add safe.directory ${env.WORKSPACE}"
+
+//                 // Get commit author email (like your teacher's example)
+//                 def committer = sh(
+//                     script: "git log -1 --pretty=format:'%ae' || echo 'unknown@local'",
+//                     returnStdout: true
+//                 ).trim()
+
+//                 // Read all <testcase> lines from the pytest JUnit report
+//                 def raw = sh(
+//                     script: "grep -h \"<testcase\" reports/results.xml || true",
+//                     returnStdout: true
+//                 ).trim()
+
+//                 int total = 0
+//                 int passed = 0
+//                 int failed = 0
+//                 int skipped = 0
+
+//                 def details = ""
+
+//                 if (raw) {
+//                     raw.split('\\n').each { line ->
+//                         total++
+
+//                         def matcher = (line =~ /name=\"([^\"]+)\"/)
+//                         def name = matcher ? matcher[0][1] : "UnknownTest"
+
+//                         if (line.contains("<failure")) {
+//                             failed++
+//                             details += "${name} — FAILED\n"
+//                         } else if (line.contains("<skipped") || line.contains("</skipped>")) {
+//                             skipped++
+//                             details += "${name} — SKIPPED\n"
+//                         } else {
+//                             passed++
+//                             details += "${name} — PASSED\n"
+//                         }
+//                     }
+//                 }
+
+//                 def emailBody = """
+// Test Summary (Build #${env.BUILD_NUMBER})
+
+// Total Tests:   ${total}
+// Passed:        ${passed}
+// Failed:        ${failed}
+// Skipped:       ${skipped}
+
+// Committer:     ${committer}
+
+// Detailed Results:
+// ${details}
+// """
+
+//                 emailext(
+//                     // send to you + also to the committer (like teacher's style)
+//                     to: "khadeejahassan@gmail.com, ${committer}",
+//                     subject: "ChatApp Selenium Tests — Build #${env.BUILD_NUMBER} Results",
+//                     body: emailBody
+//                 )
+//             }
+//         }
+//     }
+// }
 
 
 
