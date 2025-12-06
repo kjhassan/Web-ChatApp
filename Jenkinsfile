@@ -8,7 +8,11 @@ pipeline {
 
     environment {
         // URL of your Selenium tests repo (change this later)
-        TEST_REPO = 'https://github.com/YOUR_USERNAME/Web-ChatApp-Tests.git'
+        TEST_REPO = 'https://github.com/kjhassan/Web-ChatApp-Tests.git'
+    }
+
+    triggers {
+        githubPush()
     }
 
     stages {
