@@ -9,6 +9,9 @@ pipeline {
     environment {
         // URL of your Selenium tests repo (change this later)
         TEST_REPO = 'https://github.com/kjhassan/Web-ChatApp-Tests.git'
+        MONGO_URI = credentials('MONGO_DB_URI')
+        JWT_SECRET = credentials('JWT_SECRET')
+        APP_PORT = '5000'
     }
 
     triggers {
@@ -72,23 +75,27 @@ pipeline {
 
         stage('Deploy App on EC2 (same machine)') {
             steps {
-                echo 'Deploying container on EC2 (same host as Jenkins)...'
+                echo '🚀 Deploying container on EC2 (same host as Jenkins)...'
                 sh '''
-                  # Stop old container if running
-                  docker stop chatapp || true
-                  docker rm chatapp || true
+                # Stop old container if running
+                docker stop chatapp || true
+                docker rm chatapp || true
 
-                  # Run new container
-                  docker run -d \
+                # Run new container with environment variables from Jenkins
+                docker run -d \
                     --name chatapp \
-                    -p 5000:5000 \
+                    -p ${APP_PORT}:${APP_PORT} \
+                    -e PORT="${APP_PORT}" \
+                    -e MONGO_URI="${MONGO_URI}" \
+                    -e JWT_SECRET="${JWT_SECRET}" \
+                    -e NODE_ENV="production" \
                     chatapp:latest
 
-                  # Optional cleanup to save space
-                  docker system prune -af || true
+                # Optional cleanup to save space
+                docker system prune -af || true
                 '''
             }
-        }
+        }    
     }
 
     post {
