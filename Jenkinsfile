@@ -1,4 +1,5 @@
-pipeline { 
+pipeline {
+
     agent {
         docker {
             image 'nikolaik/python-nodejs:python3.11-nodejs20'
@@ -11,6 +12,10 @@ pipeline {
         TEST_REPO_DIR = 'chatapp-tests'
         TEST_RESULTS  = 'reports/results.xml'
         EMAIL_TO      = 'khadeejahassan561@gmail.com'
+
+        // MongoDB Atlas credentials stored in Jenkins Credentials Manager
+        MONGO_URI     = credentials('mongo_uri')
+        JWT_SECRET    = credentials('jwt_secret')
     }
 
     stages {
@@ -29,8 +34,7 @@ pipeline {
             }
         }
 
-        // curl is usually there but this is safe
-        stage('Install System Tools (curl)') {
+        stage('Install System Tools') {
             steps {
                 sh '''
                   apt-get update
@@ -39,7 +43,17 @@ pipeline {
             }
         }
 
-        stage('Install App Dependencies') {
+        stage('Build Frontend') {
+            steps {
+                sh '''
+                  cd frontend
+                  npm install
+                  npm run build
+                '''
+            }
+        }
+
+        stage('Install Backend Dependencies') {
             steps {
                 sh '''
                   cd backend
@@ -48,30 +62,42 @@ pipeline {
             }
         }
 
-        stage('Start Application (port 5000)') {
+        stage('Inject Frontend into Backend') {
+            steps {
+                sh '''
+                  rm -rf backend/dist || true
+                  cp -r frontend/dist backend/dist
+                '''
+            }
+        }
+
+        stage('Start Backend Server (Atlas)') {
             steps {
                 sh '''
                   cd backend
 
-                  echo "Starting backend server..."
+                  # Inject environment variables for backend
+                  echo "MONGO_URI=${MONGO_URI}"   > .env
+                  echo "JWT_SECRET=${JWT_SECRET}" >> .env
+                  echo "PORT=5000"               >> .env
+
+                  echo "Starting backend on port 5000..."
                   nohup npm run server > /tmp/server.log 2>&1 &
 
-                  echo "Waiting for server on http://localhost:5000 ..."
+                  echo "Waiting for server to boot..."
 
-                  # Try for ~60 seconds
                   for i in $(seq 1 30); do
                     if curl -sSf http://localhost:5000 > /dev/null 2>&1; then
-                      echo "Server is up!"
+                      echo "Server is UP!"
                       exit 0
                     fi
-                    echo "Still waiting for server... ($i/30)"
+                    echo "Waiting... ($i/30)"
                     sleep 2
                   done
 
-                  echo "ERROR: Server did not start on port 5000 in time." >&2
-                  echo "---- server.log ----"
+                  echo "ERROR: Server did not start."
+                  echo "--- SERVER LOG ---"
                   cat /tmp/server.log || true
-                  echo "--------------------"
                   exit 1
                 '''
             }
@@ -87,7 +113,7 @@ pipeline {
             }
         }
 
-        stage('Run Tests') {
+        stage('Run Selenium Tests') {
             steps {
                 sh """
                   mkdir -p reports
@@ -106,82 +132,60 @@ pipeline {
 
     post {
         always {
+
             script {
-                // Use a safe path
-                def reportPath = env.TEST_RESULTS ?: 'reports/results.xml'
-                echo "Using JUnit report path: ${reportPath}"
 
-                String raw = ''
-                try {
-                    raw = sh(
-                        script: """
-                          if [ -f '${reportPath}' ]; then
-                            grep -h "<testcase" '${reportPath}' || true
-                          else
-                            echo "NO_REPORT_FILE"
-                          fi
-                        """,
-                        returnStdout: true
-                    ).trim()
-                } catch (err) {
-                    echo "WARN: Could not read test report: ${err}"
-                    raw = ''
-                }
+                // Parse test summary from JUnit XML
+                def raw = sh(
+                    script: "grep -h \"<testcase\" ${env.TEST_RESULTS} || true",
+                    returnStdout: true
+                ).trim()
 
-                int total = 0
-                int passed = 0
-                int failed = 0
-                int skipped = 0
+                int total = 0, passed = 0, failed = 0, skipped = 0
                 String details = ""
 
-                if (raw && !raw.contains("NO_REPORT_FILE")) {
-                    raw.split('\n').each { line ->
-                        if (!line.trim()) return
+                raw.split('\n').each { line ->
+                    if (!line.trim()) return
+                    total++
 
-                        total++
+                    def nameMatch = (line =~ /name=\"([^\"]+)\"/)
+                    def testName = nameMatch ? nameMatch[0][1] : "UnknownTest"
 
-                        def nameMatch = (line =~ /name=\"([^\"]+)\"/)
-                        def testName = nameMatch ? nameMatch[0][1] : "UnknownTest"
-
-                        if (line.contains("<failure")) {
-                            failed++
-                            details += "${testName} — FAILED\n"
-                        } else if (line.contains("<skipped") || line.contains("</skipped>")) {
-                            skipped++
-                            details += "${testName} — SKIPPED\n"
-                        } else {
-                            passed++
-                            details += "${testName} — PASSED\n"
-                        }
+                    if (line.contains("<failure")) {
+                        failed++
+                        details += "${testName} — FAILED\n"
+                    } else if (line.contains("<skipped")) {
+                        skipped++
+                        details += "${testName} — SKIPPED\n"
+                    } else {
+                        passed++
+                        details += "${testName} — PASSED\n"
                     }
-                } else {
-                    echo "No JUnit testcases found – tests may not have run or report missing."
                 }
 
                 def emailBody = """
-Test Summary (Build #${env.BUILD_NUMBER})
+ChatApp CI – Test Report (Build #${env.BUILD_NUMBER})
 
-Total Tests:   ${total}
-Passed:        ${passed}
-Failed:        ${failed}
-Skipped:       ${skipped}
+Total Tests: ${total}
+Passed:      ${passed}
+Failed:      ${failed}
+Skipped:     ${skipped}
 
 Detailed Results:
-${details ?: "No test details available (tests may not have run or report missing)."}
-
+${details}
 """
 
                 emailext(
                     to: env.EMAIL_TO,
-                    subject: "ChatApp CI – Build #${env.BUILD_NUMBER} Test Results",
+                    subject: "ChatApp CI – Test Results (Build #${env.BUILD_NUMBER})",
                     body: emailBody
                 )
             }
+
+            cleanWs()   // Free space on EC2 (2GB limit)
         }
     }
 }
-
-
 
 
 
