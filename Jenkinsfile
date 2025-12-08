@@ -1,11 +1,6 @@
 pipeline {
 
-    agent {
-        docker {
-            image 'nikolaik/python-nodejs:python3.11-nodejs20'
-            args '-u root:root'
-        }
-    }
+    agent any
 
     environment {
         TEST_REPO_URL = 'https://github.com/kjhassan/Web-ChatApp-Tests.git'
@@ -13,12 +8,45 @@ pipeline {
         TEST_RESULTS  = 'reports/results.xml'
         EMAIL_TO      = 'khadeejahassan561@gmail.com'
 
-        // MongoDB Atlas credentials stored in Jenkins Credentials Manager
         MONGO_URI     = credentials('mongo_uri')
         JWT_SECRET    = credentials('jwt_secret')
     }
 
     stages {
+
+        stage('Install Dependencies (Node, Python, Chrome, ChromeDriver)') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Checking Node..."
+                    if ! command -v node > /dev/null; then
+                        echo "Installing Node.js 18..."
+                        curl -fsSL https://deb.nodesource.com/setup_18.x | sudo bash -
+                        sudo apt-get install -y nodejs
+                    fi
+
+                    echo "Checking Python..."
+                    if ! command -v python3 > /dev/null; then
+                        echo "Installing Python..."
+                        sudo apt-get install -y python3 python3-pip
+                    fi
+
+                    echo "Checking Google Chrome..."
+                    if ! command -v google-chrome > /dev/null; then
+                        echo "Installing Google Chrome..."
+                        wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+                        sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
+                    fi
+
+                    echo "Checking ChromeDriver..."
+                    if ! command -v chromedriver > /dev/null; then
+                        echo "Installing ChromeDriver..."
+                        sudo apt-get install -y chromium-chromedriver
+                    fi
+                '''
+            }
+        }
 
         stage('Checkout Application Repo') {
             steps {
@@ -34,21 +62,12 @@ pipeline {
             }
         }
 
-        stage('Install System Tools') {
-            steps {
-                sh '''
-                  apt-get update
-                  apt-get install -y curl
-                '''
-            }
-        }
-
         stage('Build Frontend') {
             steps {
                 sh '''
-                  cd frontend
-                  npm install
-                  npm run build
+                    cd frontend
+                    npm install
+                    npm run build
                 '''
             }
         }
@@ -56,8 +75,8 @@ pipeline {
         stage('Install Backend Dependencies') {
             steps {
                 sh '''
-                  cd backend
-                  npm install
+                    cd backend
+                    npm install
                 '''
             }
         }
@@ -65,40 +84,40 @@ pipeline {
         stage('Inject Frontend into Backend') {
             steps {
                 sh '''
-                  rm -rf backend/dist || true
-                  cp -r frontend/dist backend/dist
+                    rm -rf backend/dist || true
+                    cp -r frontend/dist backend/dist
                 '''
             }
         }
 
-        stage('Start Backend Server (Atlas)') {
+        stage('Start Backend (MongoDB Atlas)') {
             steps {
                 sh '''
-                  cd backend
+                    cd backend
 
-                  # Inject environment variables for backend
-                  echo "MONGO_URI=${MONGO_URI}"   > .env
-                  echo "JWT_SECRET=${JWT_SECRET}" >> .env
-                  echo "PORT=5000"               >> .env
+                    echo "Creating .env file..."
+                    echo "MONGO_URI=${MONGO_URI}"    > .env
+                    echo "JWT_SECRET=${JWT_SECRET}" >> .env
+                    echo "PORT=5000"               >> .env
 
-                  echo "Starting backend on port 5000..."
-                  nohup npm run server > /tmp/server.log 2>&1 &
+                    echo "Starting backend server..."
+                    nohup npm run server > /tmp/server.log 2>&1 &
 
-                  echo "Waiting for server to boot..."
+                    echo "Waiting for backend on port 5000..."
 
-                  for i in $(seq 1 30); do
-                    if curl -sSf http://localhost:5000 > /dev/null 2>&1; then
-                      echo "Server is UP!"
-                      exit 0
-                    fi
-                    echo "Waiting... ($i/30)"
-                    sleep 2
-                  done
+                    for i in $(seq 1 30); do
+                        if curl -sSf http://localhost:5000 > /dev/null 2>&1; then
+                            echo "Server is UP!"
+                            exit 0
+                        fi
+                        echo "Waiting... ($i/30)"
+                        sleep 2
+                    done
 
-                  echo "ERROR: Server did not start."
-                  echo "--- SERVER LOG ---"
-                  cat /tmp/server.log || true
-                  exit 1
+                    echo "ERROR: Backend did not start!"
+                    echo "--- SERVER LOG ---"
+                    cat /tmp/server.log || true
+                    exit 1
                 '''
             }
         }
@@ -106,9 +125,9 @@ pipeline {
         stage('Install Test Dependencies') {
             steps {
                 sh """
-                  cd ${env.TEST_REPO_DIR}
-                  python -m pip install --upgrade pip
-                  pip install -r requirements.txt
+                    cd ${env.TEST_REPO_DIR}
+                    python3 -m pip install --upgrade pip
+                    pip3 install -r requirements.txt
                 """
             }
         }
@@ -116,9 +135,9 @@ pipeline {
         stage('Run Selenium Tests') {
             steps {
                 sh """
-                  mkdir -p reports
-                  cd ${env.TEST_REPO_DIR}
-                  pytest -v --junitxml=../${env.TEST_RESULTS}
+                    mkdir -p reports
+                    cd ${env.TEST_REPO_DIR}
+                    pytest -v --junitxml=../${env.TEST_RESULTS}
                 """
             }
         }
@@ -134,8 +153,6 @@ pipeline {
         always {
 
             script {
-
-                // Parse test summary from JUnit XML
                 def raw = sh(
                     script: "grep -h \"<testcase\" ${env.TEST_RESULTS} || true",
                     returnStdout: true
@@ -148,46 +165,44 @@ pipeline {
                     if (!line.trim()) return
                     total++
 
-                    def nameMatch = (line =~ /name=\"([^\"]+)\"/)
-                    def testName = nameMatch ? nameMatch[0][1] : "UnknownTest"
+                    def m = (line =~ /name=\"([^\"]+)\"/)
+                    def name = m ? m[0][1] : "UnknownTest"
 
                     if (line.contains("<failure")) {
                         failed++
-                        details += "${testName} — FAILED\n"
+                        details += "${name} — FAILED\n"
                     } else if (line.contains("<skipped")) {
                         skipped++
-                        details += "${testName} — SKIPPED\n"
+                        details += "${name} — SKIPPED\n"
                     } else {
                         passed++
-                        details += "${testName} — PASSED\n"
+                        details += "${name} — PASSED\n"
                     }
                 }
 
                 def emailBody = """
-ChatApp CI – Test Report (Build #${env.BUILD_NUMBER})
+ChatApp CI – Test Results (Build #${env.BUILD_NUMBER})
 
-Total Tests: ${total}
-Passed:      ${passed}
-Failed:      ${failed}
-Skipped:     ${skipped}
+Total:   ${total}
+Passed:  ${passed}
+Failed:  ${failed}
+Skipped: ${skipped}
 
-Detailed Results:
+Details:
 ${details}
 """
 
                 emailext(
                     to: env.EMAIL_TO,
-                    subject: "ChatApp CI – Test Results (Build #${env.BUILD_NUMBER})",
+                    subject: "ChatApp CI – Build #${env.BUILD_NUMBER} Test Results",
                     body: emailBody
                 )
             }
 
-            cleanWs()   // Free space on EC2 (2GB limit)
+            cleanWs()
         }
     }
 }
-
-
 
 
 
