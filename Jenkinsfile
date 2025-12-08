@@ -152,57 +152,63 @@ pipeline {
     post {
         always {
 
-            script {
-                def raw = sh(
-                    script: "grep -h \"<testcase\" ${env.TEST_RESULTS} || true",
-                    returnStdout: true
-                ).trim()
+            node {
+                script {
 
-                int total = 0, passed = 0, failed = 0, skipped = 0
-                String details = ""
+                    // Make sure the results file exists
+                    sh "touch ${env.TEST_RESULTS}"
 
-                raw.split('\n').each { line ->
-                    if (!line.trim()) return
-                    total++
+                    def raw = sh(
+                        script: "grep -h \"<testcase\" ${env.TEST_RESULTS} || true",
+                        returnStdout: true
+                    ).trim()
 
-                    def m = (line =~ /name=\"([^\"]+)\"/)
-                    def name = m ? m[0][1] : "UnknownTest"
+                    int total = 0, passed = 0, failed = 0, skipped = 0
+                    String details = ""
 
-                    if (line.contains("<failure")) {
-                        failed++
-                        details += "${name} — FAILED\n"
-                    } else if (line.contains("<skipped")) {
-                        skipped++
-                        details += "${name} — SKIPPED\n"
-                    } else {
-                        passed++
-                        details += "${name} — PASSED\n"
+                    raw.split('\n').each { line ->
+                        if (!line.trim()) return
+                        total++
+
+                        def m = (line =~ /name=\"([^\"]+)\"/)
+                        def name = m ? m[0][1] : "UnknownTest"
+
+                        if (line.contains("<failure")) {
+                            failed++
+                            details += "${name} — FAILED\n"
+                        } else if (line.contains("<skipped")) {
+                            skipped++
+                            details += "${name} — SKIPPED\n"
+                        } else {
+                            passed++
+                            details += "${name} — PASSED\n"
+                        }
                     }
+
+                    def emailBody = """
+    ChatApp CI – Test Results (Build #${env.BUILD_NUMBER})
+
+    Total:   ${total}
+    Passed:  ${passed}
+    Failed:  ${failed}
+    Skipped: ${skipped}
+
+    Details:
+    ${details}
+    """
+
+                    emailext(
+                        to: env.EMAIL_TO,
+                        subject: "ChatApp CI – Build #${env.BUILD_NUMBER} Test Results",
+                        body: emailBody
+                    )
                 }
 
-                def emailBody = """
-ChatApp CI – Test Results (Build #${env.BUILD_NUMBER})
-
-Total:   ${total}
-Passed:  ${passed}
-Failed:  ${failed}
-Skipped: ${skipped}
-
-Details:
-${details}
-"""
-
-                emailext(
-                    to: env.EMAIL_TO,
-                    subject: "ChatApp CI – Build #${env.BUILD_NUMBER} Test Results",
-                    body: emailBody
-                )
+                cleanWs()
             }
-
-            cleanWs()
         }
     }
-}
+}    
 
 
 
