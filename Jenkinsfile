@@ -55,10 +55,10 @@ pipeline {
                   echo "Starting backend server..."
                   nohup npm run server > /tmp/server.log 2>&1 &
 
-                  echo "Waiting for server on http://localhost:5000 ..."
+                  echo "Waiting for server on http://51.20.182.160:5000 ..."
 
                   for i in $(seq 1 30); do
-                    if curl -sSf http://localhost:5000 > /dev/null 2>&1; then
+                    if curl -sSf http://51.20.182.160:5000 > /dev/null 2>&1; then
                       echo "Server is up!"
                       exit 0
                     fi
