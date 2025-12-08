@@ -1,7 +1,6 @@
 pipeline {
     agent {
         docker {
-            // Combined Python + Node.js image
             image 'nikolaik/python-nodejs:python3.11-nodejs20'
             args '-u root:root'
         }
@@ -63,14 +62,14 @@ pipeline {
                   # Try for ~60 seconds
                   for i in $(seq 1 30); do
                     if curl -sSf http://localhost:5000 > /dev/null 2>&1; then
-                      echo "✅ Server is up!"
+                      echo " Server is up!"
                       exit 0
                     fi
-                    echo "⏳ Still waiting for server... ($i/30)"
+                    echo "Still waiting for server... ($i/30)"
                     sleep 2
                   done
 
-                  echo "❌ ERROR: Server did not start on port 5000 in time." >&2
+                  echo " ERROR: Server did not start on port 5000 in time." >&2
                   echo "---- server.log ----"
                   cat /tmp/server.log || true
                   echo "--------------------"
