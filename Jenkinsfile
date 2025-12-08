@@ -1,7 +1,7 @@
 pipeline { 
     agent {
         docker {
-            image 'nikolaik/python-nodejs:python3.11-nodejs20'
+            image 'python:3.11-slim'
             args '-u root:root'
         }
     }
@@ -9,16 +9,14 @@ pipeline {
     environment {
         TEST_REPO_URL = 'https://github.com/kjhassan/Web-ChatApp-Tests.git'
         TEST_REPO_DIR = 'chatapp-tests'
-        TEST_RESULTS  = 'reports/results.xml'   // used by pytest + junit
+        TEST_RESULTS  = 'reports/results.xml'
         EMAIL_TO      = 'khadeejahassan561@gmail.com'
     }
 
     stages {
 
         stage('Checkout Application Repo') {
-            steps {
-                checkout scm
-            }
+            steps { checkout scm }
         }
 
         stage('Clone Test Repo') {
@@ -29,14 +27,16 @@ pipeline {
             }
         }
 
-        stage('Install System Tools (curl)') {
+        // Install Node + npm + curl once inside the python-slim container
+        stage('Install System Tools (Node, npm, curl)') {
             steps {
                 sh '''
                   apt-get update
-                  apt-get install -y curl
+                  apt-get install -y nodejs npm curl
                 '''
             }
         }
+
 
         stage('Install App Dependencies') {
             steps {
