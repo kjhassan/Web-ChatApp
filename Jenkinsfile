@@ -1,52 +1,19 @@
-pipeline {
-
-    agent any
+pipeline { 
+    agent {
+        docker {
+            image 'nikolaik/python-nodejs:python3.11-nodejs20'
+            args '-u root:root'
+        }
+    }
 
     environment {
         TEST_REPO_URL = 'https://github.com/kjhassan/Web-ChatApp-Tests.git'
         TEST_REPO_DIR = 'chatapp-tests'
-        TEST_RESULTS  = 'reports/results.xml'
+        TEST_RESULTS  = 'reports/results.xml'   // used by pytest + junit
         EMAIL_TO      = 'khadeejahassan561@gmail.com'
-
-        MONGO_URI     = credentials('mongo_uri')
-        JWT_SECRET    = credentials('jwt_secret')
     }
 
     stages {
-
-        stage('Install Dependencies (Node, Python, Chrome, ChromeDriver)') {
-            steps {
-                sh '''
-                    set -e
-
-                    echo "Checking Node..."
-                    if ! command -v node > /dev/null; then
-                        echo "Installing Node.js 18..."
-                        curl -fsSL https://deb.nodesource.com/setup_18.x | sudo bash -
-                        sudo apt-get install -y nodejs
-                    fi
-
-                    echo "Checking Python..."
-                    if ! command -v python3 > /dev/null; then
-                        echo "Installing Python..."
-                        sudo apt-get install -y python3 python3-pip
-                    fi
-
-                    echo "Checking Google Chrome..."
-                    if ! command -v google-chrome > /dev/null; then
-                        echo "Installing Google Chrome..."
-                        wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-                        sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
-                    fi
-
-                    echo "Checking ChromeDriver..."
-                    if ! command -v chromedriver > /dev/null; then
-                        echo "Installing ChromeDriver..."
-                        sudo apt-get install -y chromium-chromedriver
-                    fi
-                '''
-            }
-        }
 
         stage('Checkout Application Repo') {
             steps {
@@ -62,62 +29,48 @@ pipeline {
             }
         }
 
-        stage('Build Frontend') {
+        stage('Install System Tools (curl)') {
             steps {
                 sh '''
-                    cd frontend
-                    npm install
-                    npm run build
+                  apt-get update
+                  apt-get install -y curl
                 '''
             }
         }
 
-        stage('Install Backend Dependencies') {
+        stage('Install App Dependencies') {
             steps {
                 sh '''
-                    cd backend
-                    npm install
+                  cd backend
+                  npm install
                 '''
             }
         }
 
-        stage('Inject Frontend into Backend') {
+        stage('Start Application (port 5000)') {
             steps {
                 sh '''
-                    rm -rf backend/dist || true
-                    cp -r frontend/dist backend/dist
-                '''
-            }
-        }
+                  cd backend
 
-        stage('Start Backend (MongoDB Atlas)') {
-            steps {
-                sh '''
-                    cd backend
+                  echo "Starting backend server..."
+                  nohup npm run server > /tmp/server.log 2>&1 &
 
-                    echo "Creating .env file..."
-                    echo "MONGO_URI=${MONGO_URI}"    > .env
-                    echo "JWT_SECRET=${JWT_SECRET}" >> .env
-                    echo "PORT=5000"               >> .env
+                  echo "Waiting for server on http://localhost:5000 ..."
 
-                    echo "Starting backend server..."
-                    nohup npm run server > /tmp/server.log 2>&1 &
+                  for i in $(seq 1 30); do
+                    if curl -sSf http://localhost:5000 > /dev/null 2>&1; then
+                      echo "Server is up!"
+                      exit 0
+                    fi
+                    echo "Still waiting for server... ($i/30)"
+                    sleep 2
+                  done
 
-                    echo "Waiting for backend on port 5000..."
-
-                    for i in $(seq 1 30); do
-                        if curl -sSf http://localhost:5000 > /dev/null 2>&1; then
-                            echo "Server is UP!"
-                            exit 0
-                        fi
-                        echo "Waiting... ($i/30)"
-                        sleep 2
-                    done
-
-                    echo "ERROR: Backend did not start!"
-                    echo "--- SERVER LOG ---"
-                    cat /tmp/server.log || true
-                    exit 1
+                  echo "ERROR: Server did not start on port 5000 in time." >&2
+                  echo "---- server.log ----"
+                  cat /tmp/server.log || true
+                  echo "--------------------"
+                  exit 1
                 '''
             }
         }
@@ -125,19 +78,19 @@ pipeline {
         stage('Install Test Dependencies') {
             steps {
                 sh """
-                    cd ${env.TEST_REPO_DIR}
-                    python3 -m pip install --upgrade pip
-                    pip3 install -r requirements.txt
+                  cd ${env.TEST_REPO_DIR}
+                  python -m pip install --upgrade pip
+                  pip install -r requirements.txt
                 """
             }
         }
 
-        stage('Run Selenium Tests') {
+        stage('Run Tests') {
             steps {
                 sh """
-                    mkdir -p reports
-                    cd ${env.TEST_REPO_DIR}
-                    pytest -v --junitxml=../${env.TEST_RESULTS}
+                  mkdir -p reports
+                  cd ${env.TEST_REPO_DIR}
+                  pytest -v --junitxml=../${env.TEST_RESULTS}
                 """
             }
         }
@@ -152,60 +105,280 @@ pipeline {
     post {
         always {
             script {
-                // Make sure the results file exists
-                sh "touch ${env.TEST_RESULTS}"
+                // Get JUnit summary from Jenkins instead of calling `sh`
+                def tra = currentBuild.rawBuild.getAction(
+                    hudson.tasks.junit.TestResultAction
+                )
 
-                def raw = sh(
-                    script: "grep -h \"<testcase\" ${env.TEST_RESULTS} || true",
-                    returnStdout: true
-                ).trim()
-
-                int total = 0, passed = 0, failed = 0, skipped = 0
+                int total  = 0
+                int failed = 0
+                int skipped = 0
+                int passed = 0
                 String details = ""
 
-                raw.split('\n').each { line ->
-                    if (!line.trim()) return
-                    total++
+                if (tra != null) {
+                    total   = tra.totalCount
+                    failed  = tra.failCount
+                    skipped = tra.skipCount
+                    passed  = total - failed - skipped
 
-                    def m = (line =~ /name=\"([^\"]+)\"/)
-                    def name = m ? m[0][1] : "UnknownTest"
+                    // Optional: list every testcase with status
+                    tra.getAllTests().each { caseResult ->
+                        def name = caseResult.fullDisplayName
+                        def status = caseResult.status  // PASSED, FAILED, SKIPPED
 
-                    if (line.contains("<failure")) {
-                        failed++
-                        details += "${name} — FAILED\n"
-                    } else if (line.contains("<skipped")) {
-                        skipped++
-                        details += "${name} — SKIPPED\n"
-                    } else {
-                        passed++
-                        details += "${name} — PASSED\n"
+                        if (status == hudson.tasks.junit.CaseResult.Status.FAILED) {
+                            details += "${name} — FAILED\n"
+                        } else if (status == hudson.tasks.junit.CaseResult.Status.SKIPPED) {
+                            details += "${name} — SKIPPED\n"
+                        } else {
+                            details += "${name} — PASSED\n"
+                        }
                     }
+                } else {
+                    details = "No JUnit test report found – tests may not have run or the XML was not generated."
                 }
 
                 def emailBody = """
-    ChatApp CI – Test Results (Build #${env.BUILD_NUMBER})
+ChatApp CI – Test Summary (Build #${env.BUILD_NUMBER})
 
-    Total:   ${total}
-    Passed:  ${passed}
-    Failed:  ${failed}
-    Skipped: ${skipped}
+Total Tests:   ${total}
+Passed:        ${passed}
+Failed:        ${failed}
+Skipped:       ${skipped}
 
-    Details:
-    ${details}
-    """
+Detailed Results:
+${details}
+"""
 
                 emailext(
                     to: env.EMAIL_TO,
                     subject: "ChatApp CI – Build #${env.BUILD_NUMBER} Test Results",
                     body: emailBody
                 )
-
-                cleanWs()
             }
         }
     }
+}
 
-}    
+
+
+
+
+
+
+
+
+
+
+// pipeline {
+
+//     agent any
+
+//     environment {
+//         TEST_REPO_URL = 'https://github.com/kjhassan/Web-ChatApp-Tests.git'
+//         TEST_REPO_DIR = 'chatapp-tests'
+//         TEST_RESULTS  = 'reports/results.xml'
+//         EMAIL_TO      = 'khadeejahassan561@gmail.com'
+
+//         MONGO_URI     = credentials('mongo_uri')
+//         JWT_SECRET    = credentials('jwt_secret')
+//     }
+
+//     stages {
+
+//         stage('Install Dependencies (Node, Python, Chrome, ChromeDriver)') {
+//             steps {
+//                 sh '''
+//                     set -e
+
+//                     echo "Checking Node..."
+//                     if ! command -v node > /dev/null; then
+//                         echo "Installing Node.js 18..."
+//                         curl -fsSL https://deb.nodesource.com/setup_18.x | sudo bash -
+//                         sudo apt-get install -y nodejs
+//                     fi
+
+//                     echo "Checking Python..."
+//                     if ! command -v python3 > /dev/null; then
+//                         echo "Installing Python..."
+//                         sudo apt-get install -y python3 python3-pip
+//                     fi
+
+//                     echo "Checking Google Chrome..."
+//                     if ! command -v google-chrome > /dev/null; then
+//                         echo "Installing Google Chrome..."
+//                         wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+//                         sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
+//                     fi
+
+//                     echo "Checking ChromeDriver..."
+//                     if ! command -v chromedriver > /dev/null; then
+//                         echo "Installing ChromeDriver..."
+//                         sudo apt-get install -y chromium-chromedriver
+//                     fi
+//                 '''
+//             }
+//         }
+
+//         stage('Checkout Application Repo') {
+//             steps {
+//                 checkout scm
+//             }
+//         }
+
+//         stage('Clone Test Repo') {
+//             steps {
+//                 dir(env.TEST_REPO_DIR) {
+//                     git branch: 'main', url: env.TEST_REPO_URL
+//                 }
+//             }
+//         }
+
+//         stage('Build Frontend') {
+//             steps {
+//                 sh '''
+//                     cd frontend
+//                     npm install
+//                     npm run build
+//                 '''
+//             }
+//         }
+
+//         stage('Install Backend Dependencies') {
+//             steps {
+//                 sh '''
+//                     cd backend
+//                     npm install
+//                 '''
+//             }
+//         }
+
+//         stage('Inject Frontend into Backend') {
+//             steps {
+//                 sh '''
+//                     rm -rf backend/dist || true
+//                     cp -r frontend/dist backend/dist
+//                 '''
+//             }
+//         }
+
+//         stage('Start Backend (MongoDB Atlas)') {
+//             steps {
+//                 sh '''
+//                     cd backend
+
+//                     echo "Creating .env file..."
+//                     echo "MONGO_URI=${MONGO_URI}"    > .env
+//                     echo "JWT_SECRET=${JWT_SECRET}" >> .env
+//                     echo "PORT=5000"               >> .env
+
+//                     echo "Starting backend server..."
+//                     nohup npm run server > /tmp/server.log 2>&1 &
+
+//                     echo "Waiting for backend on port 5000..."
+
+//                     for i in $(seq 1 30); do
+//                         if curl -sSf http://localhost:5000 > /dev/null 2>&1; then
+//                             echo "Server is UP!"
+//                             exit 0
+//                         fi
+//                         echo "Waiting... ($i/30)"
+//                         sleep 2
+//                     done
+
+//                     echo "ERROR: Backend did not start!"
+//                     echo "--- SERVER LOG ---"
+//                     cat /tmp/server.log || true
+//                     exit 1
+//                 '''
+//             }
+//         }
+
+//         stage('Install Test Dependencies') {
+//             steps {
+//                 sh """
+//                     cd ${env.TEST_REPO_DIR}
+//                     python3 -m pip install --upgrade pip
+//                     pip3 install -r requirements.txt
+//                 """
+//             }
+//         }
+
+//         stage('Run Selenium Tests') {
+//             steps {
+//                 sh """
+//                     mkdir -p reports
+//                     cd ${env.TEST_REPO_DIR}
+//                     pytest -v --junitxml=../${env.TEST_RESULTS}
+//                 """
+//             }
+//         }
+
+//         stage('Publish Test Results') {
+//             steps {
+//                 junit "${env.TEST_RESULTS}"
+//             }
+//         }
+//     }
+
+//     post {
+//         always {
+//             script {
+//                 // Make sure the results file exists
+//                 sh "touch ${env.TEST_RESULTS}"
+
+//                 def raw = sh(
+//                     script: "grep -h \"<testcase\" ${env.TEST_RESULTS} || true",
+//                     returnStdout: true
+//                 ).trim()
+
+//                 int total = 0, passed = 0, failed = 0, skipped = 0
+//                 String details = ""
+
+//                 raw.split('\n').each { line ->
+//                     if (!line.trim()) return
+//                     total++
+
+//                     def m = (line =~ /name=\"([^\"]+)\"/)
+//                     def name = m ? m[0][1] : "UnknownTest"
+
+//                     if (line.contains("<failure")) {
+//                         failed++
+//                         details += "${name} — FAILED\n"
+//                     } else if (line.contains("<skipped")) {
+//                         skipped++
+//                         details += "${name} — SKIPPED\n"
+//                     } else {
+//                         passed++
+//                         details += "${name} — PASSED\n"
+//                     }
+//                 }
+
+//                 def emailBody = """
+//     ChatApp CI – Test Results (Build #${env.BUILD_NUMBER})
+
+//     Total:   ${total}
+//     Passed:  ${passed}
+//     Failed:  ${failed}
+//     Skipped: ${skipped}
+
+//     Details:
+//     ${details}
+//     """
+
+//                 emailext(
+//                     to: env.EMAIL_TO,
+//                     subject: "ChatApp CI – Build #${env.BUILD_NUMBER} Test Results",
+//                     body: emailBody
+//                 )
+
+//                 cleanWs()
+//             }
+//         }
+//     }
+
+// }    
 
 
 
